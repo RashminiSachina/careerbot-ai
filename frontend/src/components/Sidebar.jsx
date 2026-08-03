@@ -18,7 +18,7 @@ const TOPICS = [
   { id: 'career_path', label: 'Career Transition', icon: Compass },
 ];
 
-export default function Sidebar({ activeTopic, onSelectTopic }) {
+export default function Sidebar({ activeTopic, onSelectTopic, onOpenToolkit }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
@@ -55,14 +55,22 @@ export default function Sidebar({ activeTopic, onSelectTopic }) {
         <div>
           <div className="sidebar-section-title">Career Toolkit</div>
           <div className="topic-list">
-            <div className="topic-btn" style={{ cursor: 'default', opacity: 0.8 }}>
+            <button
+              className="topic-btn"
+              onClick={() => onOpenToolkit('star')}
+              title="Open STAR Method Guide"
+            >
               <BookOpen className="topic-icon" />
               <span>STAR Method Guide</span>
-            </div>
-            <div className="topic-btn" style={{ cursor: 'default', opacity: 0.8 }}>
+            </button>
+            <button
+              className="topic-btn"
+              onClick={() => onOpenToolkit('ats')}
+              title="Open ATS Score Checklist"
+            >
               <CheckCircle2 className="topic-icon" />
               <span>ATS Score Checklist</span>
-            </div>
+            </button>
           </div>
         </div>
       </div>
