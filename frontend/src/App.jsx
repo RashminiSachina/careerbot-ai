@@ -4,6 +4,7 @@ import Header from './components/Header';
 import QuickPrompts from './components/QuickPrompts';
 import ChatMessage from './components/ChatMessage';
 import ChatInput from './components/ChatInput';
+import ToolkitModal from './components/ToolkitModal';
 import { sendChatMessage, checkBackendHealth } from './services/api';
 import { Bot, Sparkles, AlertCircle } from 'lucide-react';
 
@@ -12,6 +13,7 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isBackendConnected, setIsBackendConnected] = useState(true);
+  const [activeToolkit, setActiveToolkit] = useState(null); // 'star' | 'ats' | null
   const messagesEndRef = useRef(null);
 
   // Auto-scroll to bottom of chat
@@ -95,10 +97,19 @@ export default function App() {
 
   return (
     <div className="app-container">
+      {/* Toolkit Modal */}
+      {activeToolkit && (
+        <ToolkitModal
+          type={activeToolkit}
+          onClose={() => setActiveToolkit(null)}
+        />
+      )}
+
       {/* Left Sidebar */}
       <Sidebar 
         activeTopic={activeTopic} 
-        onSelectTopic={setActiveTopic} 
+        onSelectTopic={setActiveTopic}
+        onOpenToolkit={setActiveToolkit}
       />
 
       {/* Main Chat Interface */}
