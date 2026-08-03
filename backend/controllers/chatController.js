@@ -39,20 +39,50 @@ const handleChatMessage = async (req, res) => {
 
     if (hasValidKey) {
       try {
-        // Attempt AI API call using Gemini or standard fetch endpoint if configured
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+        // Build conversation history for Gemini API
+        const contents = [];
+        
+        // Add system instruction context
+        contents.push({
+          role: 'user',
+          parts: [{ text: `${CAREER_ASSISTANT_SYSTEM_PROMPT}\n\nCurrent User Context Topic: ${topic}` }]
+        });
+        contents.push({
+          role: 'model',
+          parts: [{ text: 'Understood. I am CareerPulse, your AI Career Assistant. How can I help you with your career goals today?' }]
+        });
+
+        // Add previous message history if available
+        if (Array.isArray(history) && history.length > 0) {
+          history.slice(-6).forEach(msg => {
+            if (msg.role && msg.content) {
+              contents.push({
+                role: msg.role === 'user' ? 'user' : 'model',
+                parts: [{ text: msg.content }]
+              });
+            }
+          });
+        }
+
+        // Add current user prompt
+        contents.push({
+          role: 'user',
+          parts: [{ text: trimmedMessage }]
+        });
+
+        // Try gemini-flash-latest endpoint
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [
-              { role: 'user', parts: [{ text: `${CAREER_ASSISTANT_SYSTEM_PROMPT}\n\nUser Context Topic: ${topic}\n\nUser Question: ${trimmedMessage}` }] }
-            ]
-          })
+          body: JSON.stringify({ contents })
         });
 
         if (response.ok) {
           const data = await response.json();
           replyText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        } else {
+          const errData = await response.json().catch(() => ({}));
+          console.warn('Gemini API error:', errData?.error?.message || response.statusText);
         }
       } catch (aiError) {
         console.warn('AI API call failed, falling back to smart career engine:', aiError.message);
@@ -85,64 +115,116 @@ const handleChatMessage = async (req, res) => {
 /**
  * Smart Career Rule-Based Response Generator (Fallback when API key is pending)
  */
+/**
+ * Smart Career Contextual Response Generator
+ * Analyzes the user's specific question text to return tailored, distinct advice.
+ */
 function generateSmartCareerResponse(userMessage, topic) {
-  const lowerMsg = userMessage.toLowerCase();
+  const msg = userMessage.trim();
+  const lowerMsg = msg.toLowerCase();
 
-  if (lowerMsg.includes('resume') || lowerMsg.includes('cv') || topic === 'resume') {
-    return `### 📄 High-Impact Resume Optimization Tips
+  // 1. Specific Bullet Points / Resume Optimization
+  if (lowerMsg.includes('bullet') || lowerMsg.includes('xyz') || lowerMsg.includes('accomplish')) {
+    return `### ✍️ Action-Oriented Resume Bullet Point Formula
 
-Here is how you can make your resume stand out to top recruiters and ATS (Applicant Tracking Systems):
+To make your bullet points stand out for **"${msg}"**, structure them with the **Google XYZ Formula**:
 
-1. **Quantify Achievements**: Use the **Google XYZ formula**: *"Accomplished [X] as measured by [Y], by doing [Z]"* (e.g., *"Increased user signups by 35% in 3 months by redesigning onboarding flow"*).
-2. **Tailor Keywords**: Match core keywords from the target Job Description into your Skills and Work Experience sections.
-3. **Keep Format Clean**: Use single-column layouts with clear section headers (\`Experience\`, \`Skills\`, \`Projects\`, \`Education\`).
-4. **Action Verbs First**: Start every bullet point with strong verbs like *Spearheaded, Optimized, Engineered, Delivered, Redesigned*.
+- **Formula**: *Achieved [X] as measured by [Y], by doing [Z]*
+- **Example**: *"Engineered automated data pipelines using Python, reducing processing latency by 45% and saving 12 developer hours weekly."*
 
-💡 **Next Step**: Would you like me to review a specific bullet point from your resume or suggest target keywords for your industry?`;
+**Key Verbs to Use**:
+- *Engineering/Tech*: Spearheaded, Architected, Refactored, Deployed, Automated.
+- *Product/Management*: Scaled, Accelerated, Streamlined, Orchestrated, Increased.
+
+💡 **Try this**: Share 1 bullet point from your experience, and I will rewrite it into 3 polished ATS-friendly versions for you!`;
   }
 
-  if (lowerMsg.includes('interview') || lowerMsg.includes('mock') || topic === 'interview') {
-    return `### 🎯 Interview Preparation Strategy & STAR Framework
+  // 2. ATS Formatting & Keywords
+  if (lowerMsg.includes('ats') || lowerMsg.includes('format') || lowerMsg.includes('template') || lowerMsg.includes('scanner')) {
+    return `### 🤖 ATS (Applicant Tracking System) Optimization Checklist
 
-Mastering interview responses requires clear structure and confidence!
+Here is how to ensure your resume passes automated ATS scanners:
 
-- **Use the STAR Method**:
-  - **S**ituation: Set the scene & context.
-  - **T**ask: Explain your specific responsibility.
-  - **A**ction: Detail the exact steps YOU took.
-  - **R**esult: Highlight outcomes, metrics, and key takeaways.
+1. **File Format**: Use clean, standard \`.pdf\` or \`.docx\` without text boxes, tables, or complex graphic elements.
+2. **Standard Section Headers**: Use exact headings: \`Work Experience\`, \`Skills\`, \`Projects\`, \`Education\`.
+3. **Keyword Matching**: Tailor skills to match the exact terms in the Job Description (e.g. if the JD asks for *"React.js"*, don't just write *"Frontend"*).
+4. **Font & Styling**: Stick to clean typography (Arial, Inter, Calibri) between 10pt and 12pt.
 
-- **Top 3 Core Questions to Prepare**:
-  1. *"Tell me about a time you solved a complex problem under tight deadlines."*
-  2. *"How do you handle disagreement with team members or stakeholders?"*
-  3. *"Why do you want to join our team specifically?"*
-
-💡 **Next Step**: Type a common interview question you are preparing for, and we can practice a mock response together!`;
+💡 **Quick Question**: What target job title (e.g., Frontend Developer, Data Analyst) are you applying for?`;
   }
 
-  if (lowerMsg.includes('skill') || lowerMsg.includes('roadmap') || lowerMsg.includes('learn') || topic === 'skills') {
-    return `### 🚀 Career Skill Upgrade & Learning Roadmap
+  // 3. General Resume Improvement (when user asks "how can i improve my resume")
+  if (lowerMsg.includes('improve') || lowerMsg.includes('make better') || lowerMsg.includes('review') || lowerMsg.includes('resume')) {
+    return `### 📄 4-Step Master Plan to Improve Your Resume
 
-Building in-demand skills will accelerate your career trajectory:
+Regarding your query (*"${msg}"*), here are the top 4 structural improvements:
 
-1. **Core Technical/Role Mastery**: Focus on depth over breadth. Master the core framework or domain methodology first.
-2. **AI & Automation Literacy**: Learn prompt engineering, workflow automation, and how to leverage AI tools to double your efficiency.
-3. **Soft Skills & Communication**: Technical skills get you interviewed; communication & leadership get you promoted.
-4. **Build Public Proof**: Create real-world case studies, GitHub repositories, or articles showing your knowledge in action.
+1. **Top 1/3 Impact Header**: Place a 2-line professional summary highlighting your core tech stack, years of experience, and primary achievement.
+2. **Prioritize Impact Over Duties**: Don't list daily responsibilities. Show **results** (e.g. percentages, dollars saved, users impacted).
+3. **Technical Skills Grouping**: Categorize skills by type:
+   - **Languages**: *JavaScript, TypeScript, Python*
+   - **Frameworks & Tools**: *React, Node.js, Express, Git, Docker*
+4. **Project Highlights**: Include 2-3 key projects with live demo links and GitHub links.
 
-💡 **Next Step**: What specific field (e.g., Software Engineering, Data Science, Product Management, Marketing) are you currently targeting?`;
+💡 **Next Step**: Paste your current Summary section or a project description, and I'll give you instant feedback!`;
   }
 
-  return `### 💼 Hello! I'm CareerPulse, your AI Career Assistant
+  // 4. Interview prep / STAR method questions
+  if (lowerMsg.includes('interview') || lowerMsg.includes('star') || lowerMsg.includes('question') || lowerMsg.includes('prepare')) {
+    return `### 🎯 STAR Interview Framework Strategy
 
-I can help you accelerate your professional journey with personalized guidance on:
+To answer behavioral interview questions effectively:
 
-- 📄 **Resume & LinkedIn Profile Optimization**
-- 🎯 **Mock Interviews & STAR Technique Coaching**
-- 🗺️ **Career Transition & Skill Roadmaps**
-- 💡 **Salary Negotiation & Job Search Strategy**
+- **S (Situation)**: Set the scene in 2 sentences.
+- **T (Task)**: Explain your explicit responsibility or problem.
+- **A (Action)**: Highlight the exact technical steps YOU executed (60% of your answer).
+- **R (Result)**: Quantify the positive outcome or key business takeaway.
 
-How can I assist your career goals today? Feel free to ask a specific question or choose one of the topics above!`;
+**Top Technical Interview Questions**:
+1. *"Tell me about a technical bottleneck you encountered and how you solved it."*
+2. *"How do you handle scope changes or tight deadlines?"*
+
+💡 Would you like to conduct a 3-question Mock Interview right now? Just say **"Start Mock Interview"**!`;
+  }
+
+  // 5. Salary / Negotiation
+  if (lowerMsg.includes('salary') || lowerMsg.includes('negotiat') || lowerMsg.includes('offer') || lowerMsg.includes('pay')) {
+    return `### 💰 Salary & Offer Negotiation Guide
+
+Here is how to maximize your offer during salary discussions:
+
+1. **Delay Giving Exact Numbers First**: Response: *"I'm focused on finding the right mutual fit. I'd love to learn more about the role requirements before discussing compensation."*
+2. **Benchmark Market Rates**: Research compensation ranges on Levels.fyi, Glassdoor, and LinkedIn Salary.
+3. **Negotiate Beyond Base Pay**: Include signing bonus, equity/stock options, annual review cycles, and remote work flexibility.
+
+💡 **Need a script?** Tell me your target role and country/location, and I'll write a custom negotiation email script for you!`;
+  }
+
+  // 6. Skill Upgrades & Transition
+  if (lowerMsg.includes('skill') || lowerMsg.includes('transition') || lowerMsg.includes('roadmap') || lowerMsg.includes('learn')) {
+    return `### 🚀 High-Growth Career Roadmap
+
+To address your goal (*"${msg}"*):
+
+1. **Target Stack**: Pick 1 primary domain (e.g., Full-Stack Web Dev, Cloud DevOps, AI Engineering).
+2. **Build Portfolio Proof**: Build 2 complete, production-ready apps with authentication, database design, and automated testing.
+3. **Open Source & Community**: Contribute small PRs to active open source repos or document your learning journey on LinkedIn/GitHub.
+
+💡 **What domain or technology stack are you most interested in exploring next?**`;
+  }
+
+  // 7. Generic Conversational Fallback (Echoes user query specifically)
+  return `### 💼 CareerPulse Advice
+
+You asked: **"${msg}"**
+
+Here is tailored guidance to help you navigate this:
+
+- **Action Step 1**: Identify your primary goal for this request (e.g., job application, interview prep, skill growth).
+- **Action Step 2**: Breakdown complex challenges into actionable weekly targets.
+- **Action Step 3**: Track measurable progress and update your professional profiles (LinkedIn/GitHub/Resume) accordingly.
+
+💡 **How would you like to proceed?** Feel free to ask a follow-up or provide more details for deeper analysis!`;
 }
 
 module.exports = {
