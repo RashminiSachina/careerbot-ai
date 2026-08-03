@@ -89,7 +89,7 @@ const handleChatMessage = async (req, res) => {
       }
     }
 
-    // Fallback/Default Smart Career Engine if API key isn't active yet
+    // Fallback/Default Smart Career Engine if API key isn't active yet.
     if (!replyText) {
       replyText = generateSmartCareerResponse(trimmedMessage, topic);
     }
