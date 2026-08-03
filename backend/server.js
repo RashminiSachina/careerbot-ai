@@ -51,21 +51,25 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Start Server with Port Conflict Handling
-const server = app.listen(PORT, () => {
-  console.log(`=================================`);
-  console.log(`🚀 Career Assistant Backend Server`);
-  console.log(`📡 Listening on http://localhost:${PORT}`);
-  console.log(`=================================`);
-});
+// Start Server with Port Conflict Handling (only in local dev, not on Vercel)
+if (!process.env.VERCEL) {
+  const server = app.listen(PORT, () => {
+    console.log(`=================================`);
+    console.log(`🚀 Career Assistant Backend Server`);
+    console.log(`📡 Listening on http://localhost:${PORT}`);
+    console.log(`=================================`);
+  });
 
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`\n❌ Error: Port ${PORT} is already in use by another process.`);
-    console.error(`👉 Solution: Stop the existing Node process using port ${PORT} or change the PORT in your .env file.\n`);
-    process.exit(1);
-  } else {
-    console.error('Server error:', err);
-  }
-});
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`\n❌ Error: Port ${PORT} is already in use by another process.`);
+      console.error(`👉 Solution: Stop the existing Node process using port ${PORT} or change the PORT in your .env file.\n`);
+      process.exit(1);
+    } else {
+      console.error('Server error:', err);
+    }
+  });
+}
 
+// Export for Vercel serverless function
+module.exports = app;
