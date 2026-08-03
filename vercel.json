@@ -4,7 +4,6 @@
   "outputDirectory": "frontend/dist",
   "functions": {
     "api/index.js": {
-      "runtime": "@vercel/node",
       "includeFiles": "backend/**"
     }
   },
