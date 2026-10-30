@@ -2,7 +2,107 @@
  * Chat Controller for Career Assistant
  * Handles incoming chat requests, builds career-tailored system context,
  * and formats structured responses.
+ *
+ * DB persistence: when conv_id + session headers are provided, the user
+ * message and assistant reply are saved in one atomic transaction BEFORE
+ * the response is sent. A DB failure returns saved:false but never blocks
+ * the AI response from reaching the client.
  */
+const crypto = require('crypto');
+const { pool } = require('../db');
+const { UUID_V4_REGEX, SESSION_ID_REGEX, HEX64_REGEX } = require('../middleware/sessionAuth');
+
+const MAX_MESSAGE_LEN = 20000;
+
+/**
+ * Hash a secret string with SHA-256 (same as sessionAuth).
+ */
+function hashSecret(secret) {
+  return crypto.createHash('sha256').update(secret).digest('hex');
+}
+
+// ---------------------------------------------------------------------------
+// Gemini API Configuration
+// ---------------------------------------------------------------------------
+
+// Verified stable model names (Google AI docs — ai.google.dev/gemini-api/docs/models/gemini)
+// Primary:  gemini-3.8-flash — newest stable Flash model (Gemini 3, GA)
+// Fallback: gemini-3.6-flash — previous-generation stable Flash model (Gemini 3, GA)
+const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.6-flash'];
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+const GEMINI_TIMEOUT_MS = 15000;   // 15 s per attempt
+const GEMINI_MAX_RETRIES = 3;      // per model (applies to 429 / 503 only)
+
+/**
+ * Call the Gemini generateContent REST API with exponential backoff.
+ * Retries only on transient errors (HTTP 429, 503).
+ * Times out each attempt after GEMINI_TIMEOUT_MS.
+ *
+ * @param {string} modelName  - e.g. 'gemini-2.0-flash'
+ * @param {string} apiKey
+ * @param {Array}  contents   - Gemini contents array
+ * @returns {string|null}     - reply text, or null on permanent failure
+ */
+async function callGeminiWithRetry(modelName, apiKey, contents) {
+  const url = `${GEMINI_BASE_URL}/${modelName}:generateContent?key=${apiKey}`;
+
+  for (let attempt = 0; attempt < GEMINI_MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents }),
+        signal: controller.signal
+      });
+
+      clearTimeout(timer);
+
+      if (response.ok) {
+        const data = await response.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) return text;
+        // Empty candidate — treat as soft failure, try next model
+        console.warn(`[Gemini] ${modelName}: empty candidate on attempt ${attempt + 1}`);
+        return null;
+      }
+
+      const status = response.status;
+      const errData = await response.json().catch(() => ({}));
+      const errMsg = errData?.error?.message || response.statusText;
+
+      // Retry on transient rate-limit / overload errors
+      if (status === 429 || status === 503) {
+        const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
+        console.warn(`[Gemini] ${modelName}: HTTP ${status} on attempt ${attempt + 1}. Retrying in ${delay}ms...`);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+
+      // Permanent error (400, 401, 404, etc.) — log safely and bail
+      console.warn(`[Gemini] ${modelName}: permanent error HTTP ${status} — ${errMsg}`);
+      return null;
+
+    } catch (err) {
+      clearTimeout(timer);
+      if (err.name === 'AbortError') {
+        console.warn(`[Gemini] ${modelName}: request timed out after ${GEMINI_TIMEOUT_MS}ms (attempt ${attempt + 1})`);
+      } else {
+        console.warn(`[Gemini] ${modelName}: network error — ${err.message}`);
+      }
+      // Network / timeout errors are retryable
+      const delay = Math.pow(2, attempt) * 1000;
+      if (attempt < GEMINI_MAX_RETRIES - 1) {
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  }
+
+  return null;
+}
+
 
 // System persona prompt for the AI Career Assistant
 const CAREER_ASSISTANT_SYSTEM_PROMPT = `You are "CareerPulse", an expert AI Career Assistant & Counselor. 
@@ -20,12 +120,19 @@ Guidelines:
  */
 const handleChatMessage = async (req, res) => {
   try {
-    const { message, history = [], topic = 'general' } = req.body;
+    const { message, history = [], topic = 'general', conv_id } = req.body;
 
     if (!message || typeof message !== 'string' || !message.trim()) {
       return res.status(400).json({
         success: false,
         error: 'Message string is required.'
+      });
+    }
+
+    if (message.length > MAX_MESSAGE_LEN) {
+      return res.status(400).json({
+        success: false,
+        error: `Message exceeds maximum length of ${MAX_MESSAGE_LEN} characters.`
       });
     }
 
@@ -38,54 +145,50 @@ const handleChatMessage = async (req, res) => {
     let replyText = '';
 
     if (hasValidKey) {
-      try {
-        // Build conversation history for Gemini API
-        const contents = [];
-        
-        // Add system instruction context
-        contents.push({
-          role: 'user',
-          parts: [{ text: `${CAREER_ASSISTANT_SYSTEM_PROMPT}\n\nCurrent User Context Topic: ${topic}` }]
-        });
-        contents.push({
-          role: 'model',
-          parts: [{ text: 'Understood. I am CareerPulse, your AI Career Assistant. How can I help you with your career goals today?' }]
-        });
+      // Build conversation contents array (shared across model attempts)
+      const contents = [];
 
-        // Add previous message history if available
-        if (Array.isArray(history) && history.length > 0) {
-          history.slice(-6).forEach(msg => {
-            if (msg.role && msg.content) {
-              contents.push({
-                role: msg.role === 'user' ? 'user' : 'model',
-                parts: [{ text: msg.content }]
-              });
-            }
-          });
+      // System instruction context
+      contents.push({
+        role: 'user',
+        parts: [{ text: `${CAREER_ASSISTANT_SYSTEM_PROMPT}\n\nCurrent User Context Topic: ${topic}` }]
+      });
+      contents.push({
+        role: 'model',
+        parts: [{ text: 'Understood. I am CareerPulse, your AI Career Assistant. How can I help you with your career goals today?' }]
+      });
+
+      // Add previous message history (last 6 turns)
+      if (Array.isArray(history) && history.length > 0) {
+        history.slice(-6).forEach(msg => {
+          if (msg.role && msg.content) {
+            contents.push({
+              role: msg.role === 'user' ? 'user' : 'model',
+              parts: [{ text: msg.content }]
+            });
+          }
+        });
+      }
+
+      // Add current user prompt
+      contents.push({ role: 'user', parts: [{ text: trimmedMessage }] });
+
+      // Try each model in order: gemini-2.0-flash → gemini-1.5-flash
+      for (const model of GEMINI_MODELS) {
+        try {
+          const text = await callGeminiWithRetry(model, apiKey, contents);
+          if (text) {
+            replyText = text;
+            console.log(`[Gemini] Response from model: ${model}`);
+            break;
+          }
+        } catch (err) {
+          console.warn(`[Gemini] ${model} cascade error:`, err.message);
         }
+      }
 
-        // Add current user prompt
-        contents.push({
-          role: 'user',
-          parts: [{ text: trimmedMessage }]
-        });
-
-        // Try gemini-flash-latest endpoint
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contents })
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          replyText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        } else {
-          const errData = await response.json().catch(() => ({}));
-          console.warn('Gemini API error:', errData?.error?.message || response.statusText);
-        }
-      } catch (aiError) {
-        console.warn('AI API call failed, falling back to smart career engine:', aiError.message);
+      if (!replyText) {
+        console.warn('[Gemini] All models exhausted; using smart career engine fallback.');
       }
     }
 
@@ -94,17 +197,78 @@ const handleChatMessage = async (req, res) => {
       replyText = generateSmartCareerResponse(trimmedMessage, topic);
     }
 
+    // --- Persist to DB (transaction-then-respond) ---
+    let saved = false;
+    if (conv_id && pool) {
+      const sessionId = req.headers['x-session-id'];
+      const sessionSecret = req.headers['x-session-secret'];
+
+      const headersValid =
+        sessionId && SESSION_ID_REGEX.test(sessionId) &&
+        sessionSecret && HEX64_REGEX.test(sessionSecret);
+
+      if (headersValid && UUID_V4_REGEX.test(conv_id)) {
+        const hashedSecret = hashSecret(sessionSecret);
+        let conn;
+        try {
+          conn = await pool.getConnection();
+
+          // Verify conv_id belongs to this session before writing
+          const [ownership] = await conn.execute(
+            'SELECT conv_id FROM conversations WHERE conv_id = ? AND session_id = ? LIMIT 1',
+            [conv_id, sessionId]
+          );
+
+          if (ownership.length > 0) {
+            // Also verify session secret matches
+            const [sessionRow] = await conn.execute(
+              'SELECT session_secret FROM chat_sessions WHERE session_id = ? LIMIT 1',
+              [sessionId]
+            );
+
+            if (sessionRow.length > 0 && sessionRow[0].session_secret === hashedSecret) {
+              await conn.beginTransaction();
+              await conn.execute(
+                'INSERT INTO messages (conv_id, role, content) VALUES (?, ?, ?)',
+                [conv_id, 'user', trimmedMessage]
+              );
+              await conn.execute(
+                'INSERT INTO messages (conv_id, role, content) VALUES (?, ?, ?)',
+                [conv_id, 'assistant', replyText]
+              );
+              await conn.execute(
+                'UPDATE conversations SET updated_at = NOW() WHERE conv_id = ?',
+                [conv_id]
+              );
+              await conn.commit();
+              saved = true;
+            }
+          }
+        } catch (dbErr) {
+          if (conn) {
+            try { await conn.rollback(); } catch (_) {}
+          }
+          // Safe logging: code and sqlState only — never user content or credentials
+          console.error('[DB] chat persist error:', dbErr.code, dbErr.sqlState);
+        } finally {
+          if (conn) conn.release();
+        }
+      }
+    }
+
+    // Response is always sent after the DB attempt (never fire-and-forget)
     return res.status(200).json({
       success: true,
       data: {
         reply: replyText,
         timestamp: new Date().toISOString(),
         topic: topic
-      }
+      },
+      saved
     });
 
   } catch (error) {
-    console.error('Error in chat controller:', error);
+    console.error('Error in chat controller:', error.message);
     return res.status(500).json({
       success: false,
       error: 'An internal server error occurred while processing your request.'

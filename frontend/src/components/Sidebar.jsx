@@ -7,7 +7,8 @@ import {
   Compass, 
   Briefcase, 
   BookOpen, 
-  CheckCircle2 
+  CheckCircle2,
+  History
 } from 'lucide-react';
 
 const TOPICS = [
@@ -18,7 +19,7 @@ const TOPICS = [
   { id: 'career_path', label: 'Career Transition', icon: Compass },
 ];
 
-export default function Sidebar({ activeTopic, onSelectTopic, onOpenToolkit }) {
+export default function Sidebar({ activeTopic, onSelectTopic, onOpenToolkit, onNavigate, activeView }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
@@ -37,18 +38,32 @@ export default function Sidebar({ activeTopic, onSelectTopic, onOpenToolkit }) {
           <div className="topic-list">
             {TOPICS.map((topic) => {
               const Icon = topic.icon;
-              const isActive = activeTopic === topic.id;
+              const isActive = activeView === 'chat' && activeTopic === topic.id;
               return (
                 <button
                   key={topic.id}
                   className={`topic-btn ${isActive ? 'active' : ''}`}
-                  onClick={() => onSelectTopic(topic.id)}
+                  onClick={() => { onNavigate('chat'); onSelectTopic(topic.id); }}
                 >
                   <Icon className="topic-icon" />
                   <span>{topic.label}</span>
                 </button>
               );
             })}
+          </div>
+        </div>
+
+        <div>
+          <div className="sidebar-section-title">History</div>
+          <div className="topic-list">
+            <button
+              className={`topic-btn ${activeView === 'history' || activeView === 'conversation' ? 'active' : ''}`}
+              onClick={() => onNavigate('history')}
+              title="View Chat History"
+            >
+              <History className="topic-icon" />
+              <span>Chat History</span>
+            </button>
           </div>
         </div>
 

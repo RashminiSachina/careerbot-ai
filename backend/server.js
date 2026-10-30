@@ -1,10 +1,13 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const chatRoutes = require('./routes/chat');
 
 // Load environment variables
 dotenv.config();
+
+const chatRoutes = require('./routes/chat');
+const conversationRoutes = require('./routes/conversations');
+
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -13,13 +16,14 @@ const PORT = process.env.PORT || 5000;
 app.use(cors({
   origin: '*', // Allow all origins for dev setup flexibility
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-Id', 'X-Session-Secret']
 }));
 
 app.use(express.json());
 
 // API Routes
 app.use('/api/chat', chatRoutes);
+app.use('/api/conversations', conversationRoutes);
 
 // Base root endpoint
 app.get('/', (req, res) => {
