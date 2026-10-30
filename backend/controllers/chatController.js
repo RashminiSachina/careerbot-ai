@@ -28,33 +28,73 @@ function hashSecret(secret) {
 // Verified stable model names (Google AI docs — ai.google.dev/gemini-api/docs/models/gemini)
 // Primary:  gemini-3.8-flash — newest stable Flash model (Gemini 3, GA)
 // Fallback: gemini-3.6-flash — previous-generation stable Flash model (Gemini 3, GA)
+// Note: Free tier has limited quota (20 requests/day for gemini-3.8-flash)
 const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.6-flash'];
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
-const GEMINI_TIMEOUT_MS = 15000;   // 15 s per attempt
-const GEMINI_MAX_RETRIES = 3;      // per model (applies to 429 / 503 only)
+const GEMINI_TIMEOUT_MS = 60000;   // 60 s per attempt (increased from 15s)
+const GEMINI_MAX_RETRIES = 3;      // per model (applies to 429 / 503 / timeout only)
 
 /**
- * Call the Gemini generateContent REST API with exponential backoff.
- * Retries only on transient errors (HTTP 429, 503).
- * Times out each attempt after GEMINI_TIMEOUT_MS.
+ * Generate random jitter for exponential backoff (±25% of base delay).
+ * Prevents thundering herd when multiple requests retry simultaneously.
  *
- * @param {string} modelName  - e.g. 'gemini-2.0-flash'
+ * @param {number} baseDelayMs - Base delay in milliseconds
+ * @returns {number} - Delay with jitter applied
+ */
+function getJitteredDelay(baseDelayMs) {
+  const jitterFactor = 0.25; // ±25% jitter
+  const jitter = (Math.random() * 2 - 1) * baseDelayMs * jitterFactor;
+  return Math.max(0, baseDelayMs + jitter);
+}
+
+/**
+ * Build request body for Gemini API with system instruction.
+ *
+ * @param {string} modelName - Model name
+ * @param {Array} contents - Conversation contents
+ * @param {string} systemPrompt - System instruction text
+ * @returns {Object} - Request body
+ */
+function buildRequestBody(modelName, contents, systemPrompt) {
+  const body = {
+    systemInstruction: {
+      parts: [{ text: systemPrompt }]
+    },
+    contents
+  };
+
+  return body;
+}
+
+/**
+ * Call the Gemini generateContent REST API with exponential backoff and jitter.
+ * Retries only on transient errors (HTTP 429, 503, timeout).
+ * Times out each attempt after GEMINI_TIMEOUT_MS (60s).
+ *
+ * @param {string} modelName  - e.g. 'gemini-3.8-flash'
  * @param {string} apiKey
  * @param {Array}  contents   - Gemini contents array
  * @returns {string|null}     - reply text, or null on permanent failure
  */
-async function callGeminiWithRetry(modelName, apiKey, contents) {
-  const url = `${GEMINI_BASE_URL}/${modelName}:generateContent?key=${apiKey}`;
+async function callGeminiWithRetry(modelName, apiKey, contents, systemPrompt) {
+  const url = `${GEMINI_BASE_URL}/${modelName}:generateContent`;
+  const requestBody = buildRequestBody(modelName, contents, systemPrompt);
+
+  console.log(`[Gemini] Requesting ${modelName} with ${contents.length} content turns, system prompt length: ${systemPrompt.length} chars`);
 
   for (let attempt = 0; attempt < GEMINI_MAX_RETRIES; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
 
     try {
+      console.log(`[Gemini] Attempt ${attempt + 1}/${GEMINI_MAX_RETRIES} for ${modelName}`);
       const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents }),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
+        },
+        body: JSON.stringify(requestBody),
         signal: controller.signal
       });
 
@@ -63,39 +103,60 @@ async function callGeminiWithRetry(modelName, apiKey, contents) {
       if (response.ok) {
         const data = await response.json();
         const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text) return text;
+        if (text) {
+          console.log(`[Gemini] ${modelName}: successful response (${text.length} chars) on attempt ${attempt + 1}/${GEMINI_MAX_RETRIES}`);
+          return text;
+        }
         // Empty candidate — treat as soft failure, try next model
-        console.warn(`[Gemini] ${modelName}: empty candidate on attempt ${attempt + 1}`);
+        console.warn(`[Gemini] ${modelName}: empty candidate on attempt ${attempt + 1}/${GEMINI_MAX_RETRIES}`, JSON.stringify(data).substring(0, 200));
         return null;
       }
 
       const status = response.status;
       const errData = await response.json().catch(() => ({}));
+      const errCode = errData?.error?.code;
       const errMsg = errData?.error?.message || response.statusText;
+      const errStatus = errData?.error?.status;
+      console.log(`[Gemini] ${modelName}: HTTP ${status} response, error code: ${errCode || 'N/A'}, status: ${errStatus || 'N/A'}`);
 
-      // Retry on transient rate-limit / overload errors
+      // Check for quota exhaustion (RESOURCE_EXHAUSTED) - do not retry, bail immediately
+      if (status === 429 && errStatus === 'RESOURCE_EXHAUSTED') {
+        console.warn(`[Gemini] ${modelName}: Quota exhausted (free tier limit reached). Skipping to next model/fallback.`);
+        return null;
+      }
+
+      // Retry on transient rate-limit / overload errors with jittered backoff
       if (status === 429 || status === 503) {
-        const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
-        console.warn(`[Gemini] ${modelName}: HTTP ${status} on attempt ${attempt + 1}. Retrying in ${delay}ms...`);
-        await new Promise((r) => setTimeout(r, delay));
+        const baseDelay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
+        const jitteredDelay = getJitteredDelay(baseDelay);
+        console.warn(`[Gemini] ${modelName}: HTTP ${status} (code: ${errCode || 'N/A'}) on attempt ${attempt + 1}/${GEMINI_MAX_RETRIES}. Retrying in ${Math.round(jitteredDelay)}ms...`);
+        await new Promise((r) => setTimeout(r, jitteredDelay));
         continue;
       }
 
       // Permanent error (400, 401, 404, etc.) — log safely and bail
-      console.warn(`[Gemini] ${modelName}: permanent error HTTP ${status} — ${errMsg}`);
+      console.warn(`[Gemini] ${modelName}: permanent error HTTP ${status} (code: ${errCode || 'N/A'}) — ${errMsg}`);
       return null;
 
     } catch (err) {
       clearTimeout(timer);
       if (err.name === 'AbortError') {
-        console.warn(`[Gemini] ${modelName}: request timed out after ${GEMINI_TIMEOUT_MS}ms (attempt ${attempt + 1})`);
+        // Timeout error - retry with jittered backoff
+        const baseDelay = Math.pow(2, attempt) * 1000;
+        const jitteredDelay = getJitteredDelay(baseDelay);
+        console.warn(`[Gemini] ${modelName}: request timed out after ${GEMINI_TIMEOUT_MS}ms on attempt ${attempt + 1}/${GEMINI_MAX_RETRIES}`);
+        if (attempt < GEMINI_MAX_RETRIES - 1) {
+          await new Promise((r) => setTimeout(r, jitteredDelay));
+        }
       } else {
-        console.warn(`[Gemini] ${modelName}: network error — ${err.message}`);
-      }
-      // Network / timeout errors are retryable
-      const delay = Math.pow(2, attempt) * 1000;
-      if (attempt < GEMINI_MAX_RETRIES - 1) {
-        await new Promise((r) => setTimeout(r, delay));
+        // Network error - log error type and retry with jittered backoff
+        const baseDelay = Math.pow(2, attempt) * 1000;
+        const jitteredDelay = getJitteredDelay(baseDelay);
+        const errType = err.constructor.name;
+        console.warn(`[Gemini] ${modelName}: network error (${errType}) — ${err.message} on attempt ${attempt + 1}/${GEMINI_MAX_RETRIES}`);
+        if (attempt < GEMINI_MAX_RETRIES - 1) {
+          await new Promise((r) => setTimeout(r, jitteredDelay));
+        }
       }
     }
   }
@@ -148,16 +209,6 @@ const handleChatMessage = async (req, res) => {
       // Build conversation contents array (shared across model attempts)
       const contents = [];
 
-      // System instruction context
-      contents.push({
-        role: 'user',
-        parts: [{ text: `${CAREER_ASSISTANT_SYSTEM_PROMPT}\n\nCurrent User Context Topic: ${topic}` }]
-      });
-      contents.push({
-        role: 'model',
-        parts: [{ text: 'Understood. I am CareerPulse, your AI Career Assistant. How can I help you with your career goals today?' }]
-      });
-
       // Add previous message history (last 6 turns)
       if (Array.isArray(history) && history.length > 0) {
         history.slice(-6).forEach(msg => {
@@ -173,10 +224,13 @@ const handleChatMessage = async (req, res) => {
       // Add current user prompt
       contents.push({ role: 'user', parts: [{ text: trimmedMessage }] });
 
-      // Try each model in order: gemini-2.0-flash → gemini-1.5-flash
+      // System instruction with topic context
+      const systemPrompt = `${CAREER_ASSISTANT_SYSTEM_PROMPT}\n\nCurrent User Context Topic: ${topic}`;
+
+      // Try each model in order: gemini-3.8-flash → gemini-3.6-flash
       for (const model of GEMINI_MODELS) {
         try {
-          const text = await callGeminiWithRetry(model, apiKey, contents);
+          const text = await callGeminiWithRetry(model, apiKey, contents, systemPrompt);
           if (text) {
             replyText = text;
             console.log(`[Gemini] Response from model: ${model}`);
