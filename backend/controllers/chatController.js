@@ -22,17 +22,15 @@ function hashSecret(secret) {
 }
 
 // ---------------------------------------------------------------------------
-// Gemini API Configuration
+// OpenRouter API Configuration
 // ---------------------------------------------------------------------------
 
-// Verified stable model names (Google AI docs — ai.google.dev/gemini-api/docs/models/gemini)
-// Primary:  gemini-3.8-flash — newest stable Flash model (Gemini 3, GA)
-// Fallback: gemini-3.6-flash — previous-generation stable Flash model (Gemini 3, GA)
-// Note: Free tier has limited quota (20 requests/day for gemini-3.8-flash)
-const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.6-flash'];
-const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
-const GEMINI_TIMEOUT_MS = 60000;   // 60 s per attempt (increased from 15s)
-const GEMINI_MAX_RETRIES = 3;      // per model (applies to 429 / 503 / timeout only)
+// OpenRouter Free Models Router - automatically selects from available free models
+// Documentation: https://openrouter.ai/docs/guides/routing/routers/free-router
+const OPENROUTER_MODEL = 'openrouter/free';
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const OPENROUTER_TIMEOUT_MS = 60000;   // 60 s per attempt
+const OPENROUTER_MAX_RETRIES = 3;      // per request (applies to 429 / 503 / timeout only)
 
 /**
  * Generate random jitter for exponential backoff (±25% of base delay).
@@ -48,51 +46,76 @@ function getJitteredDelay(baseDelayMs) {
 }
 
 /**
- * Build request body for Gemini API with system instruction.
+ * Build request body for OpenRouter Chat Completions API.
+ * Converts conversation history to OpenAI-compatible format.
  *
- * @param {string} modelName - Model name
- * @param {Array} contents - Conversation contents
  * @param {string} systemPrompt - System instruction text
+ * @param {Array} history - Conversation history array
+ * @param {string} userMessage - Current user message
  * @returns {Object} - Request body
  */
-function buildRequestBody(modelName, contents, systemPrompt) {
-  const body = {
-    systemInstruction: {
-      parts: [{ text: systemPrompt }]
-    },
-    contents
-  };
+function buildOpenRouterRequestBody(systemPrompt, history, userMessage) {
+  const messages = [
+    {
+      role: 'system',
+      content: systemPrompt
+    }
+  ];
 
-  return body;
+  // Add conversation history (last 6 turns)
+  if (Array.isArray(history) && history.length > 0) {
+    history.slice(-6).forEach(msg => {
+      if (msg.role && msg.content) {
+        messages.push({
+          role: msg.role === 'user' ? 'user' : 'assistant',
+          content: msg.content
+        });
+      }
+    });
+  }
+
+  // Add current user message
+  messages.push({
+    role: 'user',
+    content: userMessage
+  });
+
+  return {
+    model: OPENROUTER_MODEL,
+    messages
+  };
 }
 
 /**
- * Call the Gemini generateContent REST API with exponential backoff and jitter.
+ * Call the OpenRouter Chat Completions API with exponential backoff and jitter.
  * Retries only on transient errors (HTTP 429, 503, timeout).
- * Times out each attempt after GEMINI_TIMEOUT_MS (60s).
+ * Times out each attempt after OPENROUTER_TIMEOUT_MS (60s).
  *
- * @param {string} modelName  - e.g. 'gemini-3.8-flash'
- * @param {string} apiKey
- * @param {Array}  contents   - Gemini contents array
- * @returns {string|null}     - reply text, or null on permanent failure
+ * @param {string} apiKey - OpenRouter API key
+ * @param {string} systemPrompt - System instruction text
+ * @param {Array} history - Conversation history array
+ * @param {string} userMessage - Current user message
+ * @returns {string|null} - reply text, or null on permanent failure
  */
-async function callGeminiWithRetry(modelName, apiKey, contents, systemPrompt) {
-  const url = `${GEMINI_BASE_URL}/${modelName}:generateContent`;
-  const requestBody = buildRequestBody(modelName, contents, systemPrompt);
+async function callOpenRouterWithRetry(apiKey, systemPrompt, history, userMessage) {
+  const requestBody = buildOpenRouterRequestBody(systemPrompt, history, userMessage);
 
-  console.log(`[Gemini] Requesting ${modelName} with ${contents.length} content turns, system prompt length: ${systemPrompt.length} chars`);
+  console.log(`[OpenRouter] Requesting ${OPENROUTER_MODEL} with ${history.length} history turns, system prompt length: ${systemPrompt.length} chars`);
+  console.log(`[OpenRouter] Request body messages count: ${requestBody.messages.length}`);
 
-  for (let attempt = 0; attempt < GEMINI_MAX_RETRIES; attempt++) {
+  for (let attempt = 0; attempt < OPENROUTER_MAX_RETRIES; attempt++) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
 
     try {
-      console.log(`[Gemini] Attempt ${attempt + 1}/${GEMINI_MAX_RETRIES} for ${modelName}`);
-      const response = await fetch(url, {
+      console.log(`[OpenRouter] Attempt ${attempt + 1}/${OPENROUTER_MAX_RETRIES}`);
+      const response = await fetch(OPENROUTER_BASE_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey
+          'Authorization': `Bearer ${apiKey}`,
+          'HTTP-Referer': 'https://careerbot-ai.vercel.app', // Optional: for OpenRouter rankings
+          'X-OpenRouter-Title': 'CareerPulse AI Career Assistant'
         },
         body: JSON.stringify(requestBody),
         signal: controller.signal
@@ -102,26 +125,30 @@ async function callGeminiWithRetry(modelName, apiKey, contents, systemPrompt) {
 
       if (response.ok) {
         const data = await response.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        console.log(`[OpenRouter] Response data keys:`, Object.keys(data));
+        console.log(`[OpenRouter] Choices count:`, data.choices?.length || 0);
+        const text = data.choices?.[0]?.message?.content;
+        const modelUsed = data.model || OPENROUTER_MODEL;
+        console.log(`[OpenRouter] Text extracted:`, text ? 'YES' : 'NO');
         if (text) {
-          console.log(`[Gemini] ${modelName}: successful response (${text.length} chars) on attempt ${attempt + 1}/${GEMINI_MAX_RETRIES}`);
+          console.log(`[OpenRouter] Successful response from ${modelUsed} (${text.length} chars) on attempt ${attempt + 1}/${OPENROUTER_MAX_RETRIES}`);
+          console.log(`[OpenRouter] Response preview:`, text.substring(0, 100) + '...');
           return text;
         }
-        // Empty candidate — treat as soft failure, try next model
-        console.warn(`[Gemini] ${modelName}: empty candidate on attempt ${attempt + 1}/${GEMINI_MAX_RETRIES}`, JSON.stringify(data).substring(0, 200));
+        // Empty response — treat as soft failure
+        console.warn(`[OpenRouter] Empty response on attempt ${attempt + 1}/${OPENROUTER_MAX_RETRIES}`, JSON.stringify(data).substring(0, 200));
         return null;
       }
 
       const status = response.status;
       const errData = await response.json().catch(() => ({}));
-      const errCode = errData?.error?.code;
       const errMsg = errData?.error?.message || response.statusText;
-      const errStatus = errData?.error?.status;
-      console.log(`[Gemini] ${modelName}: HTTP ${status} response, error code: ${errCode || 'N/A'}, status: ${errStatus || 'N/A'}`);
+      const errType = errData?.error?.type;
+      console.log(`[OpenRouter] HTTP ${status} response, error type: ${errType || 'N/A'}`);
 
-      // Check for quota exhaustion (RESOURCE_EXHAUSTED) - do not retry, bail immediately
-      if (status === 429 && errStatus === 'RESOURCE_EXHAUSTED') {
-        console.warn(`[Gemini] ${modelName}: Quota exhausted (free tier limit reached). Skipping to next model/fallback.`);
+      // Check for quota exhaustion - do not retry, bail immediately
+      if (status === 429 && (errMsg?.includes('quota') || errMsg?.includes('credit'))) {
+        console.warn(`[OpenRouter] Quota exhausted or rate limited. Skipping to fallback.`);
         return null;
       }
 
@@ -129,13 +156,13 @@ async function callGeminiWithRetry(modelName, apiKey, contents, systemPrompt) {
       if (status === 429 || status === 503) {
         const baseDelay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
         const jitteredDelay = getJitteredDelay(baseDelay);
-        console.warn(`[Gemini] ${modelName}: HTTP ${status} (code: ${errCode || 'N/A'}) on attempt ${attempt + 1}/${GEMINI_MAX_RETRIES}. Retrying in ${Math.round(jitteredDelay)}ms...`);
+        console.warn(`[OpenRouter] HTTP ${status} on attempt ${attempt + 1}/${OPENROUTER_MAX_RETRIES}. Retrying in ${Math.round(jitteredDelay)}ms...`);
         await new Promise((r) => setTimeout(r, jitteredDelay));
         continue;
       }
 
       // Permanent error (400, 401, 404, etc.) — log safely and bail
-      console.warn(`[Gemini] ${modelName}: permanent error HTTP ${status} (code: ${errCode || 'N/A'}) — ${errMsg}`);
+      console.warn(`[OpenRouter] Permanent error HTTP ${status} — ${errMsg}`);
       return null;
 
     } catch (err) {
@@ -144,8 +171,8 @@ async function callGeminiWithRetry(modelName, apiKey, contents, systemPrompt) {
         // Timeout error - retry with jittered backoff
         const baseDelay = Math.pow(2, attempt) * 1000;
         const jitteredDelay = getJitteredDelay(baseDelay);
-        console.warn(`[Gemini] ${modelName}: request timed out after ${GEMINI_TIMEOUT_MS}ms on attempt ${attempt + 1}/${GEMINI_MAX_RETRIES}`);
-        if (attempt < GEMINI_MAX_RETRIES - 1) {
+        console.warn(`[OpenRouter] Request timed out after ${OPENROUTER_TIMEOUT_MS}ms on attempt ${attempt + 1}/${OPENROUTER_MAX_RETRIES}`);
+        if (attempt < OPENROUTER_MAX_RETRIES - 1) {
           await new Promise((r) => setTimeout(r, jitteredDelay));
         }
       } else {
@@ -153,8 +180,8 @@ async function callGeminiWithRetry(modelName, apiKey, contents, systemPrompt) {
         const baseDelay = Math.pow(2, attempt) * 1000;
         const jitteredDelay = getJitteredDelay(baseDelay);
         const errType = err.constructor.name;
-        console.warn(`[Gemini] ${modelName}: network error (${errType}) — ${err.message} on attempt ${attempt + 1}/${GEMINI_MAX_RETRIES}`);
-        if (attempt < GEMINI_MAX_RETRIES - 1) {
+        console.warn(`[OpenRouter] Network error (${errType}) — ${err.message} on attempt ${attempt + 1}/${OPENROUTER_MAX_RETRIES}`);
+        if (attempt < OPENROUTER_MAX_RETRIES - 1) {
           await new Promise((r) => setTimeout(r, jitteredDelay));
         }
       }
@@ -198,51 +225,36 @@ const handleChatMessage = async (req, res) => {
     }
 
     const trimmedMessage = message.trim();
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.OPENROUTER_API_KEY;
+
+    // Log API key status (without exposing the actual key)
+    console.log('[OpenRouter] API Key check:', apiKey ? 'Key found' : 'No key found');
+    console.log('[OpenRouter] Key length:', apiKey ? apiKey.length : 0);
 
     // Check if an actual API Key is configured (and not placeholder)
-    const hasValidKey = apiKey && apiKey !== 'your_gemini_api_key_here';
+    const hasValidKey = apiKey && apiKey !== 'your_openrouter_api_key_here';
+
+    if (!hasValidKey) {
+      console.warn('[OpenRouter] Invalid or missing API key. Using smart career engine fallback.');
+    }
 
     let replyText = '';
 
     if (hasValidKey) {
-      // Build conversation contents array (shared across model attempts)
-      const contents = [];
-
-      // Add previous message history (last 6 turns)
-      if (Array.isArray(history) && history.length > 0) {
-        history.slice(-6).forEach(msg => {
-          if (msg.role && msg.content) {
-            contents.push({
-              role: msg.role === 'user' ? 'user' : 'model',
-              parts: [{ text: msg.content }]
-            });
-          }
-        });
-      }
-
-      // Add current user prompt
-      contents.push({ role: 'user', parts: [{ text: trimmedMessage }] });
-
       // System instruction with topic context
       const systemPrompt = `${CAREER_ASSISTANT_SYSTEM_PROMPT}\n\nCurrent User Context Topic: ${topic}`;
 
-      // Try each model in order: gemini-3.8-flash → gemini-3.6-flash
-      for (const model of GEMINI_MODELS) {
-        try {
-          const text = await callGeminiWithRetry(model, apiKey, contents, systemPrompt);
-          if (text) {
-            replyText = text;
-            console.log(`[Gemini] Response from model: ${model}`);
-            break;
-          }
-        } catch (err) {
-          console.warn(`[Gemini] ${model} cascade error:`, err.message);
+      try {
+        const text = await callOpenRouterWithRetry(apiKey, systemPrompt, history, trimmedMessage);
+        if (text) {
+          replyText = text;
+          console.log('[OpenRouter] Response received successfully');
+        } else {
+          console.warn('[OpenRouter] No response received; using smart career engine fallback.');
         }
-      }
-
-      if (!replyText) {
-        console.warn('[Gemini] All models exhausted; using smart career engine fallback.');
+      } catch (err) {
+        console.warn('[OpenRouter] API call error:', err.message);
+        console.warn('[OpenRouter] Using smart career engine fallback.');
       }
     }
 
