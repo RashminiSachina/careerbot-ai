@@ -55,8 +55,8 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Start Server with Port Conflict Handling (only in local dev, not on Vercel)
-if (!process.env.VERCEL) {
+// Start Server with Port Conflict Handling (only when run directly, not when imported by Vercel)
+if (require.main === module) {
   const server = app.listen(PORT, () => {
     console.log(`=================================`);
     console.log(`🚀 Career Assistant Backend Server`);
