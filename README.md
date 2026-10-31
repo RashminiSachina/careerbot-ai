@@ -1,6 +1,6 @@
 # 💼 CareerPulse — AI Career Assistant Chatbot
 
-CareerPulse is a full-stack AI-powered career assistant built with **React + Vite** (frontend) and **Node.js + Express** (backend), powered by the **Google Gemini API**. It provides personalized career coaching on resume optimization, interview preparation, skill roadmaps, and more.
+CareerPulse is a full-stack AI-powered career assistant built with **React + Vite** (frontend) and **Node.js + Express** (backend), powered by the **OpenRouter API**. It provides personalized career coaching on resume optimization, interview preparation, skill roadmaps, and more.
 
 ---
 
@@ -10,7 +10,7 @@ CareerPulse is a full-stack AI-powered career assistant built with **React + Vit
 
 ![CareerPulse Home Screen](screenshots/home.png)
 
-**Chat — Resume Review in Action (Gemini AI Response)**
+**Chat — Resume Review in Action (OpenRouter AI Response)**
 
 ![CareerPulse Chat Screen](screenshots/chat.png)
 
@@ -18,7 +18,7 @@ CareerPulse is a full-stack AI-powered career assistant built with **React + Vit
 
 ## 🚀 Features
 
-- 🤖 **AI-Powered Chat** — Real-time responses powered by Google Gemini (`gemini-flash-latest`)
+- 🤖 **AI-Powered Chat** — Real-time responses powered by OpenRouter (`openrouter/free`)
 - 🎯 **Focus Areas** — Topic-specific sessions: Resume Review, Mock Interview, Skill Roadmap, Career Transition
 - 📋 **Career Toolkit** — Built-in STAR Method Guide and ATS Score Checklist modals
 - 💬 **Chat History** — Maintains conversation context across messages
@@ -36,7 +36,7 @@ careerbot-ai/
 │   └── chat.png
 ├── backend/
 │   ├── controllers/
-│   │   └── chatController.js     # Gemini AI integration & fallback engine
+│   │   └── chatController.js     # OpenRouter AI integration & fallback engine
 │   ├── routes/
 │   │   └── chat.js               # POST /api/chat & health endpoints
 │   ├── .env                      # Environment variables (not committed)
@@ -69,7 +69,7 @@ careerbot-ai/
 
 ### Prerequisites
 - Node.js v18+
-- A [Google Gemini API Key](https://aistudio.google.com/app/apikey)
+- An [OpenRouter API Key](https://openrouter.ai/keys)
 
 ### 1. Clone the Repository
 
@@ -85,7 +85,7 @@ cd backend
 npm install
 ```
 
-Copy the example env file and add your Gemini API key:
+Copy the example env file and add your OpenRouter API key:
 
 ```bash
 cp .env.example .env
@@ -95,7 +95,7 @@ Edit `.env`:
 
 ```env
 PORT=5000
-GEMINI_API_KEY=your_gemini_api_key_here
+OPENROUTER_API_KEY=your_openrouter_api_key_here
 NODE_ENV=development
 ```
 
@@ -159,7 +159,7 @@ Check if the API is running.
 | Variable | Description | Required |
 |---|---|---|
 | `PORT` | Backend server port (default: 5000) | No |
-| `GEMINI_API_KEY` | Google Gemini API key | Yes |
+| `OPENROUTER_API_KEY` | OpenRouter API key | Yes |
 | `NODE_ENV` | `development` or `production` | No |
 
 ---
@@ -170,5 +170,5 @@ Check if the API is running.
 |---|---|
 | Frontend | React 18, Vite, Lucide React |
 | Backend | Node.js, Express |
-| AI Model | Google Gemini (`gemini-flash-latest`) |
+| AI Model | OpenRouter (`openrouter/free`) |
 | Styling | Vanilla CSS (design tokens, glassmorphism) |
